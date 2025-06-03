@@ -3,18 +3,18 @@
 #  disk-burnin.sh  —  portable (macOS & Linux) disk stress & integrity tester
 #  Version 1.0   © 2025
 ###############################################################################
-set -Eeuo pipefail                          # strict mode
+set -Eeuo pipefail
 trap 'printf "\n\033[31mError:\033[0m %s (line %d)\n" "$BASH_COMMAND" "$LINENO"' ERR
 
 ###############################################################################
 # ----------------------- user-tunable defaults ----------------------------- #
-PERCENT_FILL=90           # % of free space to consume
-REF_MB=1024               # reference size (MiB) – 1 GiB
-BLOCK_SIZE=64M            # dd block size
-COLUMNS=10                # files per directory row
-KEEP_DATA=0               # 1 → keep generated data
-WORKERS=                  # blank → cpu-cores-1
-FORCE_ROOT=0              # allow running on /
+PERCENT_FILL=90
+REF_MB=1024
+BLOCK_SIZE=64M
+COLUMNS=10
+KEEP_DATA=0
+WORKERS=
+FORCE_ROOT=0
 VERSION=1.0
 ###############################################################################
 
@@ -59,6 +59,23 @@ if command -v smartctl &>/dev/null && [[ $dev == /dev/* ]]; then
 else printf "SMART status unavailable.\n"; fi; echo
 
 ###############################################################################
+# ----------------------- spinner utility ----------------------------------- #
+spinner() {
+  local pid=$1
+  local msg=$2
+  local delay=0.2
+  local spin_chars=('|' '/' '—' '\')
+  local i=0
+
+  while kill -0 "$pid" 2>/dev/null; do
+    printf "\r%s [ %s ]" "$msg" "${spin_chars[i]}"
+    i=$(( (i + 1 ) % 4 ))
+    sleep $delay
+  done
+  printf "\r%s [ done ]\n" "$msg"
+}
+
+###############################################################################
 # ----------------------- plan the run -------------------------------------- #
 free_mb=$(df -Pm "$target_dir" | awk 'NR==2{print $4}')
 (( free_mb == 0 )) && die "No free space reported by df."
@@ -74,10 +91,14 @@ info "Plan        : $total_files × 1 GiB (~$((total_files)) GiB)"
 ###############################################################################
 # ----------------------- create reference file ----------------------------- #
 cd "$target_dir" || die "cannot cd into $target_dir"
-
 info "Building 1 GiB reference …"
-dd if=/dev/urandom of=reference bs=1m count=$REF_MB status=none
-$hash_cmd reference | awk '{print $1}' > reference.sha256
+
+(
+  dd if=/dev/urandom of=reference bs=1m count=$REF_MB status=none
+  $hash_cmd reference | awk '{print $1}' > reference.sha256
+) &
+spinner $! "Creating reference file:"
+
 info "Reference ready."
 
 ###############################################################################
@@ -108,7 +129,7 @@ export -f write_one verify_one
 
 ###############################################################################
 # ----------------------- progress bar -------------------------------------- #
-progress() {                       # $1 = total files
+progress() {
   local total=$1 done=0
   local cols; cols=$(tput cols 2>/dev/null || echo 80)
   (( cols < 40 )) && cols=40
@@ -161,9 +182,12 @@ EOF
 [[ ${#fail_list[@]} -gt 0 ]] && printf '%s\n' "${fail_list[@]}" > fail_list.txt
 
 ###############################################################################
-# ----------------------- cleanup ------------------------------------------- #
+# ----------------------- cleanup with spinner ------------------------------ #
 if (( KEEP_DATA == 0 )); then
-  rm -rf "$tmpdir" reference reference.sha256 */ *.sha256 */*
+  (
+    rm -rf "$tmpdir" reference reference.sha256 */ *.sha256 */*
+  ) &
+  spinner $! "Cleaning up:"
 fi
 
 ###############################################################################
